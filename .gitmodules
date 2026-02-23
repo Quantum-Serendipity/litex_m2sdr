@@ -1,0 +1,3 @@
+[submodule "litex_m2sdr/gateware/pcie_7x"]
+	path = litex_m2sdr/gateware/pcie_7x
+	url = https://github.com/regymm/pcie_7x.git
