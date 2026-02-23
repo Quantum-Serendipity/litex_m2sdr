@@ -303,12 +303,29 @@ class SI5351(LiteXModule):
 
         # ClkIn Source Mux.
         si5351_clkin = Signal()
-        self.specials += Instance("BUFGMUX",
-            i_S  = self.clkin_src,
-            i_I0 = ClockSignal("clk10"),
-            i_I1 = self.clkin_ufl,
-            o_O  = si5351_clkin,
-        )
+        if hasattr(platform.toolchain, 'pre_placement_commands'):
+            # Vivado: use BUFGMUX directly.
+            self.specials += Instance("BUFGMUX",
+                i_S  = self.clkin_src,
+                i_I0 = ClockSignal("clk10"),
+                i_I1 = self.clkin_ufl,
+                o_O  = si5351_clkin,
+            )
+        else:
+            # openXC7/nextpnr: use BUFGCTRL (the underlying primitive).
+            clkin_src_n = Signal()
+            self.comb += clkin_src_n.eq(~self.clkin_src)
+            self.specials += Instance("BUFGCTRL",
+                i_S0      = clkin_src_n,
+                i_S1      = self.clkin_src,
+                i_CE0     = 1,
+                i_CE1     = 1,
+                i_IGNORE0 = 0,
+                i_IGNORE1 = 0,
+                i_I0      = ClockSignal("clk10"),
+                i_I1      = self.clkin_ufl,
+                o_O       = si5351_clkin,
+            )
 
         # ClkIn/Enable Output.
         si5351_ddr_i1 = Signal()

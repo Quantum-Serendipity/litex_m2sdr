@@ -95,7 +95,8 @@ class SharedQPLL(LiteXModule):
             self.channel_map[config_items[0][0]] = 0
             self.channel_map[config_items[1][0]] = 1
 
-        platform.add_platform_command("set_property SEVERITY {{Warning}} [get_drc_checks REQP-49]")
+        if hasattr(platform.toolchain, 'pre_placement_commands'):
+            platform.add_platform_command("set_property SEVERITY {{Warning}} [get_drc_checks REQP-49]")
 
     @staticmethod
     def get_gt_refclks(config):

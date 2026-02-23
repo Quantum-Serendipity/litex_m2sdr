@@ -36,6 +36,8 @@ from litepcie.common            import *
 from litepcie.phy.s7pciephy     import S7PCIEPHY
 from litepcie.frontend.wishbone import LitePCIeWishboneSlave
 
+from litex_m2sdr.gateware.s7pciephy_openxc7 import S7PCIEPHYOpenXC7
+
 from liteeth.phy.a7_1000basex import A7_1000BASEX, A7_2500BASEX
 from liteeth.frontend.stream  import LiteEthStream2UDPTX, LiteEthUDP2StreamRX
 
@@ -62,7 +64,7 @@ from litex_m2sdr.software import generate_litepcie_software
 # CRG ----------------------------------------------------------------------------------------------
 
 class CRG(LiteXModule):
-    def __init__(self, platform, sys_clk_freq, with_eth=False, with_sata=False, with_white_rabbit=False):
+    def __init__(self, platform, sys_clk_freq, with_eth=False, with_sata=False, with_white_rabbit=False, with_idelayctrl=True):
         self.rst              = Signal()
         self.cd_sys           = ClockDomain()
         self.cd_clk10         = ClockDomain()
@@ -105,7 +107,8 @@ class CRG(LiteXModule):
 
         # IDelayCtrl.
         # -----------
-        self.idelayctrl = S7IDELAYCTRL(self.cd_idelay)
+        if with_idelayctrl:
+            self.idelayctrl = S7IDELAYCTRL(self.cd_idelay)
 
         # Ethernet PLL.
         # -------------
@@ -202,6 +205,7 @@ class BaseSoC(SoCMini):
     }
 
     def __init__(self, variant="m2", sys_clk_freq=int(125e6),
+        toolchain              = "vivado",
         with_pcie              = True,  with_pcie_ptm=False, pcie_gen=2, pcie_lanes=1,
         with_eth               = False, eth_sfp=0, eth_phy="1000basex", eth_local_ip="192.168.1.50", eth_udp_port=2345,
         with_sata              = False, sata_gen=2,
@@ -210,15 +214,24 @@ class BaseSoC(SoCMini):
         with_gpio              = False,
         with_rfic_oversampling = False,
     ):
+        self.toolchain = toolchain
         # Platform ---------------------------------------------------------------------------------
 
-        platform = Platform(build_multiboot=True)
+        platform = Platform(
+            build_multiboot = (toolchain == "vivado"),
+            toolchain       = toolchain,
+        )
         if variant == "baseboard":
             platform.add_extension(_io_baseboard)
         if (with_eth or with_sata) and (variant != "baseboard"):
             msg = "Ethernet and SATA are only supported when mounted in the LiteX Acorn Baseboard Mini! "
             msg += "Available here: https://enjoy-digital-shop.myshopify.com/products/litex-acorn-baseboard-mini"
             raise ValueError(msg)
+        if toolchain != "vivado":
+            if with_eth or with_sata:
+                raise NotImplementedError("Ethernet/SATA require Vivado toolchain (QPLL sharing).")
+            if with_white_rabbit:
+                raise NotImplementedError("White Rabbit requires Vivado toolchain.")
 
         # SoCMini ----------------------------------------------------------------------------------
 
@@ -235,11 +248,12 @@ class BaseSoC(SoCMini):
             with_eth          = with_eth,
             with_sata         = with_sata,
             with_white_rabbit = with_white_rabbit,
+            with_idelayctrl   = (toolchain == "vivado"),
         )
 
         # Shared QPLL.
         self.qpll = SharedQPLL(platform,
-            with_pcie       = with_pcie,
+            with_pcie       = with_pcie and (toolchain == "vivado"),
             with_eth        = with_eth | with_white_rabbit,
             eth_phy         = eth_phy,
             eth_refclk_freq = 125e6,
@@ -327,20 +341,23 @@ class BaseSoC(SoCMini):
 
         # ICAP -------------------------------------------------------------------------------------
 
-        self.icap = ICAP()
-        self.icap.add_reload()
-        self.icap.add_timing_constraints(platform, sys_clk_freq, self.crg.cd_sys.clk)
-        platform.add_false_path_constraints(self.icap.cd_icap.clk, self.crg.cd_sys.clk)
+        if toolchain == "vivado":
+            self.icap = ICAP()
+            self.icap.add_reload()
+            self.icap.add_timing_constraints(platform, sys_clk_freq, self.crg.cd_sys.clk)
+            platform.add_false_path_constraints(self.icap.cd_icap.clk, self.crg.cd_sys.clk)
 
         # XADC -------------------------------------------------------------------------------------
 
-        self.xadc = XADC()
+        if toolchain == "vivado":
+            self.xadc = XADC()
 
         # DNA --------------------------------------------------------------------------------------
 
-        self.dna = DNA()
-        self.dna.add_timing_constraints(platform, sys_clk_freq, self.crg.cd_sys.clk)
-        platform.add_false_path_constraints(self.dna.cd_dna.clk, self.crg.cd_sys.clk)
+        if toolchain == "vivado":
+            self.dna = DNA()
+            self.dna.add_timing_constraints(platform, sys_clk_freq, self.crg.cd_sys.clk)
+            platform.add_false_path_constraints(self.dna.cd_dna.clk, self.crg.cd_sys.clk)
 
         # SPI Flash --------------------------------------------------------------------------------
 
@@ -356,27 +373,35 @@ class BaseSoC(SoCMini):
             if variant == "baseboard":
                 assert pcie_lanes == 1
             pcie_dmas = 1
-            self.pcie_phy = S7PCIEPHY(platform, platform.request(f"pcie_x{pcie_lanes}_{variant}"),
-                data_width = {1: 64, 2: 64, 4: 128}[pcie_lanes],
-                bar0_size  = 0x10_0000,
-                with_ptm   = with_pcie_ptm,
-                cd         = "sys",
-            )
-            self.comb += ClockSignal("refclk_pcie").eq(self.pcie_phy.pcie_refclk)
-            if variant == "baseboard":
-                self.pcie_phy.add_gt_loc_constraints(["GTPE2_CHANNEL_X0Y4"], by_pipe_lane=False)
-            self.pcie_phy.update_config({
-                "PCIe_Blk_Locn"            : "X0Y0",
-                "Base_Class_Menu"          : "Wireless_controller",
-                "Sub_Class_Interface_Menu" : "RF_controller",
-                "Class_Code_Base"          : "0D",
-                "Class_Code_Sub"           : "10",
-                "Bar0_Scale"               : "Megabytes",
-                "Bar0_Size"                : 1,
-                "Link_Speed"               : {1: "2.5_GT/s", 2: "5.0_GT/s"}[pcie_gen],
-                "Trgt_Link_Speed"          : {1: "4'h1",     2: "4'h2"}[pcie_gen],
-                }
-            )
+            if toolchain == "vivado":
+                self.pcie_phy = S7PCIEPHY(platform, platform.request(f"pcie_x{pcie_lanes}_{variant}"),
+                    data_width = {1: 64, 2: 64, 4: 128}[pcie_lanes],
+                    bar0_size  = 0x10_0000,
+                    with_ptm   = with_pcie_ptm,
+                    cd         = "sys",
+                )
+                self.comb += ClockSignal("refclk_pcie").eq(self.pcie_phy.pcie_refclk)
+                if variant == "baseboard":
+                    self.pcie_phy.add_gt_loc_constraints(["GTPE2_CHANNEL_X0Y4"], by_pipe_lane=False)
+                self.pcie_phy.update_config({
+                    "PCIe_Blk_Locn"            : "X0Y0",
+                    "Base_Class_Menu"          : "Wireless_controller",
+                    "Sub_Class_Interface_Menu" : "RF_controller",
+                    "Class_Code_Base"          : "0D",
+                    "Class_Code_Sub"           : "10",
+                    "Bar0_Scale"               : "Megabytes",
+                    "Bar0_Size"                : 1,
+                    "Link_Speed"               : {1: "2.5_GT/s", 2: "5.0_GT/s"}[pcie_gen],
+                    "Trgt_Link_Speed"          : {1: "4'h1",     2: "4'h2"}[pcie_gen],
+                    }
+                )
+            else:
+                self.pcie_phy = S7PCIEPHYOpenXC7(platform, platform.request(f"pcie_x{pcie_lanes}_{variant}"),
+                    data_width = 64,
+                    bar0_size  = 0x10_0000,
+                    cd         = "sys",
+                )
+                self.comb += ClockSignal("refclk_pcie").eq(self.pcie_phy.pcie_refclk)
 
             # MSIs
             # ----
@@ -398,7 +423,8 @@ class BaseSoC(SoCMini):
                 with_msi              = True, msis = pcie_msis,
                 with_ptm              = with_pcie_ptm,
             )
-            self.pcie_phy.use_external_qpll(qpll_channel=self.qpll.get_channel("pcie"))
+            if toolchain == "vivado":
+                self.pcie_phy.use_external_qpll(qpll_channel=self.qpll.get_channel("pcie"))
             self.comb += self.pcie_dma0.synchronizer.pps.eq(self.pps_gen.pps_pulse)
 
             # Host <-> SoC DMA Bus.
@@ -440,17 +466,18 @@ class BaseSoC(SoCMini):
                     self.ptm_requester.time.eq(self.time_gen.time)
                 ]
 
-            # Timings False Paths.
-            # --------------------
-            false_paths = [
-                ("{{*s7pciephy_clkout0}}", "{{*crg_*clkout0}}"),
-                ("{{*s7pciephy_clkout1}}", "{{*crg_*clkout0}}"),
-                ("{{*s7pciephy_clkout3}}", "{{*crg_*clkout0}}"),
-                ("{{*s7pciephy_clkout0}}", "{{*s7pciephy_clkout1}}")
-            ]
-            for clk0, clk1 in false_paths:
-                platform.toolchain.pre_placement_commands.append(f"set_false_path -from [get_clocks {clk0}] -to [get_clocks {clk1}]")
-                platform.toolchain.pre_placement_commands.append(f"set_false_path -from [get_clocks {clk1}] -to [get_clocks {clk0}]")
+            # Timings False Paths (Vivado-only).
+            # -----------------------------------
+            if toolchain == "vivado":
+                false_paths = [
+                    ("{{*s7pciephy_clkout0}}", "{{*crg_*clkout0}}"),
+                    ("{{*s7pciephy_clkout1}}", "{{*crg_*clkout0}}"),
+                    ("{{*s7pciephy_clkout3}}", "{{*crg_*clkout0}}"),
+                    ("{{*s7pciephy_clkout0}}", "{{*s7pciephy_clkout1}}")
+                ]
+                for clk0, clk1 in false_paths:
+                    platform.toolchain.pre_placement_commands.append(f"set_false_path -from [get_clocks {clk0}] -to [get_clocks {clk1}]")
+                    platform.toolchain.pre_placement_commands.append(f"set_false_path -from [get_clocks {clk1}] -to [get_clocks {clk0}]")
 
         # Ethernet ---------------------------------------------------------------------------------
 
@@ -884,6 +911,7 @@ def main():
     parser.add_argument("--flash-multiboot", action="store_true", help="Flash multiboot bitstreams.")
     parser.add_argument("--rescan",          action="store_true", help="Execute PCIe Rescan while Loading/Flashing.")
     parser.add_argument("--driver",          action="store_true", help="Generate PCIe driver from LitePCIe (override local version).")
+    parser.add_argument("--toolchain",       default="vivado",    help="FPGA toolchain.", choices=["vivado", "yosys+nextpnr", "openxc7"])
 
     # PCIe parameters.
     parser.add_argument("--with-pcie",       action="store_true", help="Enable PCIe Communication.")
@@ -932,6 +960,7 @@ def main():
     soc = BaseSoC(
         # Generic.
         variant       = args.variant,
+        toolchain     = args.toolchain,
 
         # PCIe.
         with_pcie     = args.with_pcie,
@@ -987,7 +1016,9 @@ def main():
         return r
 
     builder = Builder(soc, output_dir=os.path.join("build", get_build_name()), csr_csv="test/csr.csv")
+    cwd = os.getcwd()
     builder.build(build_name=get_build_name(), run=args.build)
+    os.chdir(cwd)
 
     # Generate LitePCIe Driver.
     generate_litepcie_software(soc, "litex_m2sdr/software", use_litepcie_software=args.driver)

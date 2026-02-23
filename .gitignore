@@ -14,3 +14,15 @@ modules.order
 *.order.cmd
 __pycache__
 *.csv
+litex_m2sdr/software/user/m2sdr_fm_rx
+litex_m2sdr/software/user/m2sdr_fm_tx
+litex_m2sdr/software/user/m2sdr_gen
+litex_m2sdr/software/user/m2sdr_gpio
+litex_m2sdr/software/user/m2sdr_play
+litex_m2sdr/software/user/m2sdr_record
+litex_m2sdr/software/user/m2sdr_rf
+litex_m2sdr/software/user/m2sdr_sata
+litex_m2sdr/software/user/m2sdr_util
+software/kernel/csr.h
+software/kernel/mem.h
+software/kernel/soc.h

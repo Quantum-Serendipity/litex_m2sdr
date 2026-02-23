@@ -4,6 +4,7 @@
 # Copyright (c) 2024-2026 Enjoy-Digital <enjoy-digital.fr>
 # SPDX-License-Identifier: BSD-2-Clause
 
+import os
 import subprocess
 
 from litex.build.generic_platform import *
@@ -193,24 +194,46 @@ class Platform(Xilinx7SeriesPlatform):
     default_clk_name   = "clk100"
     default_clk_period = 1e9/100e6
 
-    def __init__(self, build_multiboot=False):
+    def __init__(self, build_multiboot=False, toolchain="vivado"):
         device = "xc7a200t"
-        Xilinx7SeriesPlatform.__init__(self, f"{device}sbg484-3", _io, _connectors, toolchain="vivado")
+        Xilinx7SeriesPlatform.__init__(self, f"{device}sbg484-3", _io, _connectors, toolchain=toolchain)
         self.image_size = {"xc7a200t" : 0x00800000}[device]
 
-        self.toolchain.bitstream_commands = [
-            "set_property BITSTREAM.CONFIG.UNUSEDPIN Pulldown [current_design]",
-            "set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 4 [current_design]",
-            "set_property BITSTREAM.CONFIG.CONFIGRATE 33 [current_design]",
-            "set_property BITSTREAM.CONFIG.OVERTEMPPOWERDOWN ENABLE [current_design]",
-            "set_property BITSTREAM.GENERAL.COMPRESS TRUE [current_design]",
-            "set_property CFGBVS VCCO [current_design]",
-            "set_property CONFIG_VOLTAGE 3.3 [current_design]",
-        ]
-        self.toolchain.additional_commands = [
-            "write_cfgmem -force -format bin -interface spix4 -size 16 -loadbit \"up 0x0 \
-            {build_name}.bit\" -file {build_name}.bin",
-        ]
+        if toolchain != "vivado":
+            # Filter FASM for prjxray compatibility (IBUFDS_GTE2, PCIE_2_1 rename, etc.).
+            _orig_finalize = self.toolchain.finalize
+            _filter_script = os.path.join(
+                os.path.abspath(os.path.dirname(__file__)),
+                "litex_m2sdr", "gateware", "filter_fasm.py",
+            )
+            def _patched_finalize():
+                _orig_finalize()
+                self.toolchain._pre_packer_cmd.insert(0, "python3")
+                db_root = self.toolchain._pre_packer_opts[
+                    self.toolchain._pre_packer_cmd[1]  # fasm2frames
+                ].split("--db-root ")[1].split(" ")[0]
+                self.toolchain._pre_packer_opts["python3"] = \
+                    "{script} {top}.fasm {db_root}".format(
+                        script  = _filter_script,
+                        top     = self.toolchain._build_name,
+                        db_root = db_root,
+                    )
+            self.toolchain.finalize = _patched_finalize
+
+        if toolchain == "vivado":
+            self.toolchain.bitstream_commands = [
+                "set_property BITSTREAM.CONFIG.UNUSEDPIN Pulldown [current_design]",
+                "set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 4 [current_design]",
+                "set_property BITSTREAM.CONFIG.CONFIGRATE 33 [current_design]",
+                "set_property BITSTREAM.CONFIG.OVERTEMPPOWERDOWN ENABLE [current_design]",
+                "set_property BITSTREAM.GENERAL.COMPRESS TRUE [current_design]",
+                "set_property CFGBVS VCCO [current_design]",
+                "set_property CONFIG_VOLTAGE 3.3 [current_design]",
+            ]
+            self.toolchain.additional_commands = [
+                "write_cfgmem -force -format bin -interface spix4 -size 16 -loadbit \"up 0x0 \
+                {build_name}.bit\" -file {build_name}.bin",
+            ]
         if build_multiboot:
             self.toolchain.additional_commands += [
                 # Build Operational-Multiboot Bitstream.

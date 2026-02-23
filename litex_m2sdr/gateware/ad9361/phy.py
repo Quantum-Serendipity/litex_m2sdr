@@ -9,6 +9,7 @@ from migen.genlib.cdc import MultiReg
 from migen.genlib.resetsync import AsyncResetSynchronizer
 
 from litex.gen import *
+from litex.gen import LiteXContext
 
 from litex.soc.interconnect.csr import *
 from litex.soc.interconnect     import stream
@@ -106,12 +107,20 @@ class AD9361PHY(LiteXModule):
             AsyncResetSynchronizer(ClockDomain("rfic"), ResetSignal("sys")),
         ]
 
+        # Toolchain detection for IDDR mode.
+        # nextpnr-xilinx only supports SAME_EDGE/OPPOSITE_EDGE, not SAME_EDGE_PIPELINED.
+        # Emulate SAME_EDGE_PIPELINED with SAME_EDGE + fabric FF on Q1.
+        platform = LiteXContext.platform
+        iddr_pipelined = hasattr(platform.toolchain, 'pre_placement_commands')
+        ddr_clk_edge   = "SAME_EDGE_PIPELINED" if iddr_pipelined else "SAME_EDGE"
+
         # RX Framing.
         # -----------
         # Processes RX_FRAME signal: high for MSBs (or channel 1 in 2R2T), low for LSBs(or channel 2
         # in 2R2T). Operates in SDR with 50% duty cycle.
         rx_frame_ibufds = Signal()
         rx_frame        = Signal()
+        rx_frame_q1     = Signal()
         self.specials += [
             Instance("IBUFDS",
                 i_I  = pads.rx_frame_p,
@@ -119,16 +128,20 @@ class AD9361PHY(LiteXModule):
                 o_O  = rx_frame_ibufds
             ),
             Instance("IDDR",
-                p_DDR_CLK_EDGE = "SAME_EDGE_PIPELINED",
+                p_DDR_CLK_EDGE = ddr_clk_edge,
                 i_C  = ClockSignal("rfic"),
                 i_CE = 1,
                 i_S  = 0,
                 i_R  = 0,
                 i_D  = rx_frame_ibufds,
-                o_Q1 = rx_frame,
+                o_Q1 = rx_frame_q1,
                 o_Q2 = Open(),
             )
         ]
+        if iddr_pipelined:
+            self.comb += rx_frame.eq(rx_frame_q1)
+        else:
+            self.sync.rfic += rx_frame.eq(rx_frame_q1)
 
         # RX Counter
         # ----------
@@ -151,9 +164,10 @@ class AD9361PHY(LiteXModule):
         # Captures RX_D[5:0] in DDR mode: I samples on rising edge, Q samples on falling edge.
         # Assembles 12-bit I/Q samples with MSBs first, then LSBs, interleaved. Uses AD9361's
         # alignment to ensure correct data capture.
-        rx_data_ibufds = Signal(6)
-        rx_data_half_i = Signal(6)
-        rx_data_half_q = Signal(6)
+        rx_data_ibufds   = Signal(6)
+        rx_data_half_i   = Signal(6)
+        rx_data_half_q   = Signal(6)
+        rx_data_half_i_q1 = Signal(6)
         for i in range(6):
             self.specials += [
                 Instance("IBUFDS",
@@ -162,16 +176,20 @@ class AD9361PHY(LiteXModule):
                     o_O  = rx_data_ibufds[i]
                 ),
                 Instance("IDDR",
-                    p_DDR_CLK_EDGE = "SAME_EDGE_PIPELINED",
+                    p_DDR_CLK_EDGE = ddr_clk_edge,
                     i_C  = ClockSignal("rfic"),
                     i_CE = 1,
                     i_S  = 0,
                     i_R  = 0,
                     i_D  = rx_data_ibufds[i],
-                    o_Q1 = rx_data_half_i[i],
+                    o_Q1 = rx_data_half_i_q1[i],
                     o_Q2 = rx_data_half_q[i],
                 )
             ]
+        if iddr_pipelined:
+            self.comb += rx_data_half_i.eq(rx_data_half_i_q1)
+        else:
+            self.sync.rfic += rx_data_half_i.eq(rx_data_half_i_q1)
         rx_data_ia  = Signal(12)
         rx_data_qa  = Signal(12)
         rx_data_ib  = Signal(12)
